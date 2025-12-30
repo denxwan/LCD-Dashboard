@@ -145,27 +145,27 @@ static void example_increase_lvgl_tick(void *arg)
 }
 
 /*Read the touchpad*/
-void example_touchpad_read( lv_indev_drv_t * drv, lv_indev_data_t * data )
-{
-    uint16_t touchpad_x[1] = {0};
-    uint16_t touchpad_y[1] = {0};
-    uint8_t touchpad_cnt = 0;
+// void example_touchpad_read( lv_indev_drv_t * drv, lv_indev_data_t * data )
+// {
+//     uint16_t touchpad_x[1] = {0};
+//     uint16_t touchpad_y[1] = {0};
+//     uint8_t touchpad_cnt = 0;
 
-    /* Read touch controller data */
-    esp_lcd_touch_read_data(drv->user_data);
+//     /* Read touch controller data */
+//     esp_lcd_touch_read_data(drv->user_data);
 
-    /* Get coordinates */
-    bool touchpad_pressed = esp_lcd_touch_get_coordinates(drv->user_data, touchpad_x, touchpad_y, NULL, &touchpad_cnt, 1);
+//     /* Get coordinates */
+//     bool touchpad_pressed = esp_lcd_touch_get_coordinates(drv->user_data, touchpad_x, touchpad_y, NULL, &touchpad_cnt, 1);
 
-    if (touchpad_pressed && touchpad_cnt > 0) {
-        data->point.x = touchpad_x[0];
-        data->point.y = touchpad_y[0];
-        data->state = LV_INDEV_STATE_PR;
-        ESP_LOGI(TAG, "X=%u Y=%u", data->point.x, data->point.y);
-    } else {
-        data->state = LV_INDEV_STATE_REL;
-    }
-}
+//     if (touchpad_pressed && touchpad_cnt > 0) {
+//         data->point.x = touchpad_x[0];
+//         data->point.y = touchpad_y[0];
+//         data->state = LV_INDEV_STATE_PR;
+//         ESP_LOGI(TAG, "X=%u Y=%u", data->point.x, data->point.y);
+//     } else {
+//         data->state = LV_INDEV_STATE_REL;
+//     }
+// }
 /**
  * @brief i2c master initialization
  */
@@ -221,29 +221,29 @@ void app_main(void)
     ESP_ERROR_CHECK(gpio_config(&bk_gpio_config));
 #endif
 /********************* Touch *********************/
-    ESP_ERROR_CHECK(i2c_master_init());
-    ESP_LOGI(TAG, "I2C initialized successfully");  
+    // ESP_ERROR_CHECK(i2c_master_init());
+    // ESP_LOGI(TAG, "I2C initialized successfully");  
 
-    esp_lcd_touch_handle_t tp = NULL;
-    esp_lcd_panel_io_handle_t tp_io_handle = NULL;
-    esp_lcd_panel_io_i2c_config_t tp_io_config = ESP_LCD_TOUCH_IO_I2C_CST820_CONFIG();
-    ESP_LOGI(TAG, "Initialize touch IO (I2C)");
-    /* Touch IO handle */
-    ESP_ERROR_CHECK(esp_lcd_new_panel_io_i2c((esp_lcd_i2c_bus_handle_t)I2C_MASTER_NUM, &tp_io_config, &tp_io_handle));
-    esp_lcd_touch_config_t tp_cfg = {
-        .x_max = EXAMPLE_LCD_V_RES,
-        .y_max = EXAMPLE_LCD_H_RES,
-        .rst_gpio_num = I2C_Touch_RST_IO,
-        .int_gpio_num = I2C_Touch_INT_IO,
-        .flags = {
-            .swap_xy = 0,
-            .mirror_x = 0,
-            .mirror_y = 0,
-        },
-    };
-    /* Initialize touch */
-    ESP_LOGI(TAG, "Initialize touch controller CST820");
-    ESP_ERROR_CHECK(esp_lcd_touch_new_i2c_cst820(tp_io_handle, &tp_cfg, &tp));
+    // esp_lcd_touch_handle_t tp = NULL;
+    // esp_lcd_panel_io_handle_t tp_io_handle = NULL;
+    // esp_lcd_panel_io_i2c_config_t tp_io_config = ESP_LCD_TOUCH_IO_I2C_CST820_CONFIG();
+    // ESP_LOGI(TAG, "Initialize touch IO (I2C)");
+    // /* Touch IO handle */
+    // ESP_ERROR_CHECK(esp_lcd_new_panel_io_i2c((esp_lcd_i2c_bus_handle_t)I2C_MASTER_NUM, &tp_io_config, &tp_io_handle));
+    // esp_lcd_touch_config_t tp_cfg = {
+    //     .x_max = EXAMPLE_LCD_V_RES,
+    //     .y_max = EXAMPLE_LCD_H_RES,
+    //     .rst_gpio_num = I2C_Touch_RST_IO,
+    //     .int_gpio_num = I2C_Touch_INT_IO,
+    //     .flags = {
+    //         .swap_xy = 0,
+    //         .mirror_x = 0,
+    //         .mirror_y = 0,
+    //     },
+    // };
+    // /* Initialize touch */
+    // ESP_LOGI(TAG, "Initialize touch controller CST820");
+    // ESP_ERROR_CHECK(esp_lcd_touch_new_i2c_cst820(tp_io_handle, &tp_cfg, &tp));
 
 /********************* RGB LCD panel driver *********************/
     ESP_LOGI(TAG, "Install RGB LCD panel driver");
@@ -354,8 +354,8 @@ void app_main(void)
     lv_indev_drv_init ( &indev_drv );
     indev_drv.type = LV_INDEV_TYPE_POINTER;
     indev_drv.disp = disp;
-    indev_drv.read_cb = example_touchpad_read;
-    indev_drv.user_data = tp;
+    // indev_drv.read_cb = example_touchpad_read;
+    // indev_drv.user_data = tp;
     lv_indev_drv_register( &indev_drv );
 
     esp_timer_handle_t lvgl_tick_timer = NULL;
@@ -372,3 +372,121 @@ void app_main(void)
         lv_timer_handler();
     }
 }
+
+
+// #include <stdio.h>
+// #include "freertos/FreeRTOS.h"
+// #include "freertos/task.h"
+// #include "driver/spi_master.h"
+// #include "driver/gpio.h"
+// #include "esp_lcd_panel_ops.h"
+// #include "esp_lcd_panel_spi.h"
+// #include "esp_log.h"
+// #include "lvgl.h"
+
+// #define TAG "ST7701S_SPI"
+
+// /********************* SPI Pins *********************/
+// #define SPI_SCLK  2
+// #define SPI_MOSI  1
+// #define SPI_CS    42
+// #define SPI_DC    3
+// #define SPI_RST   4
+// #define SPI_BL    6
+
+// /********************* LVGL *********************/
+// #define LVGL_TICK_PERIOD_MS 2
+
+// static void lvgl_tick_cb(void *arg)
+// {
+//     lv_tick_inc(LVGL_TICK_PERIOD_MS);
+// }
+
+// /********************* Backlight *********************/
+// static void bl_init(void)
+// {
+//     gpio_reset_pin(SPI_BL);
+//     gpio_set_direction(SPI_BL, GPIO_MODE_OUTPUT);
+//     gpio_set_level(SPI_BL, 1); // Turn on backlight
+// }
+
+// /********************* Main *********************/
+// void app_main(void)
+// {
+//     ESP_LOGI(TAG, "Initialize Backlight");
+//     bl_init();
+
+//     ESP_LOGI(TAG, "Initialize SPI Bus");
+//     spi_bus_config_t buscfg = {
+//         .mosi_io_num = SPI_MOSI,
+//         .miso_io_num = -1,
+//         .sclk_io_num = SPI_SCLK,
+//         .quadwp_io_num = -1,
+//         .quadhd_io_num = -1,
+//         .max_transfer_sz = 480*480*2 + 8
+//     };
+//     ESP_ERROR_CHECK(spi_bus_initialize(SPI3_HOST, &buscfg, SPI_DMA_CH_AUTO));
+
+//     ESP_LOGI(TAG, "Attach ST7701S panel to SPI");
+//     esp_lcd_panel_io_spi_config_t io_config = {
+//         .dc_gpio_num = SPI_DC,
+//         .cs_gpio_num = SPI_CS,
+//         .pclk_hz = 20*1000*1000, // 20 MHz SPI clock
+//         .flags = {
+//             .dc_high_on_data = 1
+//         }
+//     };
+//     esp_lcd_panel_io_handle_t io_handle = NULL;
+//     ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi(SPI3_HOST, &io_config, &io_handle));
+
+//     esp_lcd_panel_handle_t panel_handle = NULL;
+//     esp_lcd_panel_dev_config_t panel_dev_cfg = {
+//         .reset_gpio_num = SPI_RST,
+//         .rgb_endian = LCD_RGB_ENDIAN_RGB,
+//         .bits_per_pixel = 16,
+//         .cmd_bits = 8,
+//         .param_bits = 8
+//     };
+//     ESP_ERROR_CHECK(esp_lcd_new_panel_st7701s(io_handle, &panel_dev_cfg, &panel_handle));
+//     ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_handle));
+//     ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle));
+//     ESP_ERROR_CHECK(esp_lcd_panel_set_gap(panel_handle, 0, 0));
+
+//     ESP_LOGI(TAG, "Initialize LVGL");
+//     lv_init();
+//     static lv_disp_draw_buf_t disp_buf;
+//     static lv_color_t buf1[480*20]; // small buffer
+//     lv_disp_draw_buf_init(&disp_buf, buf1, NULL, 480*480);
+
+//     lv_disp_drv_t disp_drv;
+//     lv_disp_drv_init(&disp_drv);
+//     disp_drv.hor_res = 480;
+//     disp_drv.ver_res = 480;
+//     disp_drv.flush_cb = [](lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_map){
+//         esp_lcd_panel_handle_t panel = (esp_lcd_panel_handle_t)drv->user_data;
+//         esp_lcd_panel_draw_bitmap(panel, area->x1, area->y1, area->x2+1, area->y2+1, color_map);
+//         lv_disp_flush_ready(drv);
+//     };
+//     disp_drv.draw_buf = &disp_buf;
+//     disp_drv.user_data = panel_handle;
+//     lv_disp_drv_register(&disp_drv);
+
+//     ESP_LOGI(TAG, "Start LVGL tick timer");
+//     const esp_timer_create_args_t tick_timer_args = {
+//         .callback = &lvgl_tick_cb,
+//         .name = "lv_tick"
+//     };
+//     esp_timer_handle_t lv_tick_timer;
+//     ESP_ERROR_CHECK(esp_timer_create(&tick_timer_args, &lv_tick_timer));
+//     ESP_ERROR_CHECK(esp_timer_start_periodic(lv_tick_timer, LVGL_TICK_PERIOD_MS * 1000));
+
+//     // Test image
+//     LV_IMG_DECLARE(test1);
+//     lv_obj_t *icon = lv_img_create(lv_scr_act());
+//     lv_img_set_src(icon, &test1);
+
+//     while(1) {
+//         lv_timer_handler();
+//         vTaskDelay(pdMS_TO_TICKS(10));
+//     }
+// }
