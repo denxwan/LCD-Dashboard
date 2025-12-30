@@ -94,7 +94,7 @@ static void spi_init(void) {
         .sclk_io_num = SPI_SCLK,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
-        .max_transfer_sz = LCD_H_RES * 40 * 2 // max chunk = 40 rows
+        .max_transfer_sz = 480 * 8 * 2 // max 8 rows per transaction
     };
     ESP_ERROR_CHECK(spi_bus_initialize(SPI3_HOST, &buscfg, SPI_DMA_CH_AUTO));
 
@@ -111,11 +111,12 @@ static void spi_init(void) {
     gpio_set_direction(SPI_RST, GPIO_MODE_OUTPUT);
 }
 
-// --- LVGL flush callback with chunked SPI transfer ---
+// --- LVGL flush callback (chunked transfer to avoid SPI max len) ---
 static void lvgl_flush_cb(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_map) {
     int32_t w = area->x2 - area->x1 + 1;
     int32_t h = area->y2 - area->y1 + 1;
-    int32_t row, max_rows = 40; // send 40 rows per SPI transaction
+    int32_t row;
+    int32_t max_rows = 8; // 8 rows per SPI transfer = 480*8*2 = 7680 bytes (safe for ESP32 DMA)
 
     for (row = 0; row < h; row += max_rows) {
         int rows_to_send = (row + max_rows > h) ? (h - row) : max_rows;
@@ -146,11 +147,11 @@ static void lvgl_flush_cb(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t
     lv_disp_flush_ready(disp);
 }
 
-// --- LVGL tick task (Core 1, WDT safe) ---
+// --- LVGL tick task ---
 static void lv_tick_task(void *arg) {
     while (1) {
-        lv_tick_inc(10);                 // 10 ms tick
-        vTaskDelay(pdMS_TO_TICKS(10));   // yield CPU
+        lv_tick_inc(10);                // 10 ms
+        vTaskDelay(pdMS_TO_TICKS(10));  // yield to avoid WDT
     }
 }
 
@@ -161,7 +162,7 @@ void app_main(void) {
     // Initialize LVGL
     lv_init();
     static lv_disp_draw_buf_t draw_buf;
-    static lv_color_t buf1[LCD_H_RES * 40]; // 40 rows per buffer
+    static lv_color_t buf1[LCD_H_RES * 40]; // 40 rows buffer
     lv_disp_draw_buf_init(&draw_buf, buf1, NULL, LCD_H_RES * 40);
 
     static lv_disp_drv_t disp_drv;
@@ -175,7 +176,7 @@ void app_main(void) {
     // LVGL tick task pinned to Core 1
     xTaskCreatePinnedToCore(lv_tick_task, "lv_tick", 4096, NULL, 5, NULL, 1);
 
-    // Demo: draw red rectangle
+    // Demo: red rectangle
     lv_obj_t *rect = lv_obj_create(lv_scr_act());
     lv_obj_set_size(rect, LCD_H_RES, LCD_V_RES);
     lv_obj_set_style_bg_color(rect, lv_color_hex(0xFF0000), 0);
