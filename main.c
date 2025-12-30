@@ -1,492 +1,178 @@
 #include <stdio.h>
-#include "sdkconfig.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/semphr.h"
-#include "esp_timer.h"
-#include "esp_lcd_panel_ops.h"
-#include "esp_lcd_panel_rgb.h"
+#include "driver/spi_master.h"
 #include "driver/gpio.h"
-#include "esp_err.h"
 #include "esp_log.h"
 #include "lvgl.h"
-#include "driver/i2c.h"
-#include "driver/ledc.h"
-#include "LCD_Driver/ST7701S.h"
-#include "Touch/CST820.h"
-#include "demos/lv_demos.h"
-#include "EXIO/TCA9554PWR.h"
-#include "esp_io_expander.h"
-#include "esp_io_expander_tca9554.h"
 
-#define LEDC_TIMER              LEDC_TIMER_0
-#define LEDC_MODE               LEDC_LOW_SPEED_MODE
-#define LEDC_OUTPUT_IO          6      // Define the output GPIO
-#define LEDC_CHANNEL            LEDC_CHANNEL_0
-#define LEDC_DUTY_RES           LEDC_TIMER_13_BIT // Set duty resolution to 13 bits
-#define LEDC_DUTY               (0)    // Set duty to 50%. (2 ** 13) * 50% = 4096
-#define LEDC_FREQUENCY          (4000) // Frequency in Hertz. Set frequency at 4 kHz
+#define TAG "ST7701S_SPI_LCD"
 
-static const char *TAG = "example";
-/********************* I2C *********************/
-#define I2C_Touch_SCL_IO            7         /*!< GPIO number used for I2C master clock */
-#define I2C_Touch_SDA_IO            15         /*!< GPIO number used for I2C master data  */
-#define I2C_Touch_INT_IO            16         /*!< GPIO number used for I2C master data  */
-#define I2C_Touch_RST_IO            -1         /*!< GPIO number used for I2C master clock */
-#define I2C_MASTER_NUM              0         /*!< I2C master i2c port number, the number of i2c peripheral interfaces available will depend on the chip */
-#define I2C_MASTER_FREQ_HZ          400000    /*!< I2C master clock frequency */
-#define I2C_MASTER_TX_BUF_DISABLE   0         /*!< I2C master doesn't need buffer */
-#define I2C_MASTER_RX_BUF_DISABLE   0         /*!< I2C master doesn't need buffer */
-#define I2C_MASTER_TIMEOUT_MS       1000
-/********************* LCD *********************/
-#define EXAMPLE_LCD_PIXEL_CLOCK_HZ     (18 * 1000 * 1000)
-#define EXAMPLE_LCD_BK_LIGHT_ON_LEVEL  1
-#define EXAMPLE_LCD_BK_LIGHT_OFF_LEVEL !EXAMPLE_LCD_BK_LIGHT_ON_LEVEL
-#define EXAMPLE_PIN_NUM_BK_LIGHT       -1
-#define EXAMPLE_PIN_NUM_HSYNC          38
-#define EXAMPLE_PIN_NUM_VSYNC          39
-#define EXAMPLE_PIN_NUM_DE             40
-#define EXAMPLE_PIN_NUM_PCLK           41
-#define EXAMPLE_PIN_NUM_DATA0          5  // B0
-#define EXAMPLE_PIN_NUM_DATA1          45 // B1
-#define EXAMPLE_PIN_NUM_DATA2          48 // B2
-#define EXAMPLE_PIN_NUM_DATA3          47 // B3
-#define EXAMPLE_PIN_NUM_DATA4          21 // B4
-#define EXAMPLE_PIN_NUM_DATA5          14 // G0
-#define EXAMPLE_PIN_NUM_DATA6          13 // G1
-#define EXAMPLE_PIN_NUM_DATA7          12 // G2
-#define EXAMPLE_PIN_NUM_DATA8          11 // G3
-#define EXAMPLE_PIN_NUM_DATA9          10 // G4
-#define EXAMPLE_PIN_NUM_DATA10         9  // G5
-#define EXAMPLE_PIN_NUM_DATA11         46 // R0
-#define EXAMPLE_PIN_NUM_DATA12         3  // R1
-#define EXAMPLE_PIN_NUM_DATA13         8  // R2
-#define EXAMPLE_PIN_NUM_DATA14         18 // R3
-#define EXAMPLE_PIN_NUM_DATA15         17 // R4
-#define EXAMPLE_PIN_NUM_DISP_EN        -1
-// The pixel number in horizontal and vertical
-#define EXAMPLE_LCD_H_RES              480
-#define EXAMPLE_LCD_V_RES              480
+// SPI pins
+#define SPI_MOSI 1
+#define SPI_SCLK 2
+#define SPI_CS   42
+#define SPI_DC   3
+#define SPI_RST  4
 
-#if CONFIG_EXAMPLE_DOUBLE_FB
-#define EXAMPLE_LCD_NUM_FB             2
-#else
-#define EXAMPLE_LCD_NUM_FB             1
-#endif 
+// LCD resolution
+#define LCD_H_RES 480
+#define LCD_V_RES 480
 
-#define EXAMPLE_LVGL_TICK_PERIOD_MS    2
+static spi_device_handle_t lcd_spi = NULL;
 
-#define SPI_SDA 1
-#define SPI_SCL 2
-#define SPI_CS  42
-
-/********************* BackLight *********************/
-static void example_ledc_init(void)
-{
-    // Prepare and then apply the LEDC PWM timer configuration
-    ledc_timer_config_t ledc_timer = {
-        .speed_mode       = LEDC_MODE,
-        .timer_num        = LEDC_TIMER,
-        .duty_resolution  = LEDC_DUTY_RES,
-        .freq_hz          = LEDC_FREQUENCY,  // Set output frequency at 4 kHz
-        .clk_cfg          = LEDC_AUTO_CLK
+// --- Helper SPI functions ---
+static void st7701s_cmd(uint8_t cmd) {
+    spi_transaction_t t = {
+        .length = 8,
+        .tx_buffer = &cmd,
+        .user = (void*)0
     };
-    ESP_ERROR_CHECK(ledc_timer_config(&ledc_timer));
-
-    // Prepare and then apply the LEDC PWM channel configuration
-    ledc_channel_config_t ledc_channel = {
-        .speed_mode     = LEDC_MODE,
-        .channel        = LEDC_CHANNEL,
-        .timer_sel      = LEDC_TIMER,
-        .intr_type      = LEDC_INTR_DISABLE,
-        .gpio_num       = LEDC_OUTPUT_IO,
-        .duty           = 0, // Set duty to 0%
-        .hpoint         = 0
-    };
-    ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel));
+    spi_device_polling_transmit(lcd_spi, &t);
 }
 
-#if CONFIG_EXAMPLE_AVOID_TEAR_EFFECT_WITH_SEM
-SemaphoreHandle_t sem_vsync_end;
-SemaphoreHandle_t sem_gui_ready;
-#endif
+static void st7701s_data(const uint8_t *data, int len) {
+    spi_transaction_t t = {
+        .length = len * 8,
+        .tx_buffer = data,
+        .user = (void*)1
+    };
+    spi_device_polling_transmit(lcd_spi, &t);
+}
 
-static bool example_on_vsync_event(esp_lcd_panel_handle_t panel, const esp_lcd_rgb_panel_event_data_t *event_data, void *user_data)
-{
-    BaseType_t high_task_awoken = pdFALSE;
-#if CONFIG_EXAMPLE_AVOID_TEAR_EFFECT_WITH_SEM
-    if (xSemaphoreTakeFromISR(sem_gui_ready, &high_task_awoken) == pdTRUE) {
-        xSemaphoreGiveFromISR(sem_vsync_end, &high_task_awoken);
+// --- Custom ST7701S initialization ---
+static void st7701s_init(void) {
+    gpio_set_level(SPI_RST, 0);
+    vTaskDelay(pdMS_TO_TICKS(50));
+    gpio_set_level(SPI_RST, 1);
+    vTaskDelay(pdMS_TO_TICKS(120));
+
+    // Command set sequence
+    st7701s_cmd(0x11); // Sleep out
+    vTaskDelay(pdMS_TO_TICKS(120));
+
+    // Command set control
+    st7701s_cmd(0xFF);
+    uint8_t cmdset[] = {0x77, 0x01, 0x00, 0x00, 0x10};
+    st7701s_data(cmdset, 5);
+
+    // Display line setting: 480 lines
+    st7701s_cmd(0xC0);
+    uint8_t c0[] = {0x3B, 0x00}; // (59+1)*8 = 480 lines
+    st7701s_data(c0, 2);
+
+    // Porch
+    st7701s_cmd(0xC1);
+    uint8_t c1[] = {0x0C, 0x02};
+    st7701s_data(c1, 2);
+
+    // Memory access control
+    st7701s_cmd(0x36);
+    uint8_t madctl = 0x00; // No rotation
+    st7701s_data(&madctl, 1);
+
+    // Pixel format (RGB565)
+    st7701s_cmd(0x3A);
+    uint8_t pf = 0x55;
+    st7701s_data(&pf, 1);
+
+    // Display on
+    st7701s_cmd(0x29);
+}
+
+// --- SPI initialization ---
+static void spi_init(void) {
+    spi_bus_config_t buscfg = {
+        .mosi_io_num = SPI_MOSI,
+        .miso_io_num = -1,
+        .sclk_io_num = SPI_SCLK,
+        .quadwp_io_num = -1,
+        .quadhd_io_num = -1,
+        .max_transfer_sz = LCD_H_RES * LCD_V_RES * 2 + 8
+    };
+    ESP_ERROR_CHECK(spi_bus_initialize(SPI3_HOST, &buscfg, SPI_DMA_CH_AUTO));
+
+    spi_device_interface_config_t devcfg = {
+        .clock_speed_hz = 40 * 1000 * 1000,
+        .mode = 0,
+        .spics_io_num = SPI_CS,
+        .queue_size = 7,
+        .pre_cb = NULL,
+    };
+    ESP_ERROR_CHECK(spi_bus_add_device(SPI3_HOST, &devcfg, &lcd_spi));
+
+    gpio_set_direction(SPI_DC, GPIO_MODE_OUTPUT);
+    gpio_set_direction(SPI_RST, GPIO_MODE_OUTPUT);
+}
+
+// --- LVGL flush callback ---
+static void lvgl_flush_cb(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_map) {
+    int32_t w = area->x2 - area->x1 + 1;
+    int32_t h = area->y2 - area->y1 + 1;
+
+    // Set column
+    uint8_t col_addr[] = {
+        (area->x1 >> 8) & 0xFF,
+        area->x1 & 0xFF,
+        (area->x2 >> 8) & 0xFF,
+        area->x2 & 0xFF
+    };
+    st7701s_cmd(0x2A); // Column addr
+    st7701s_data(col_addr, 4);
+
+    // Set row
+    uint8_t row_addr[] = {
+        (area->y1 >> 8) & 0xFF,
+        area->y1 & 0xFF,
+        (area->y2 >> 8) & 0xFF,
+        area->y2 & 0xFF
+    };
+    st7701s_cmd(0x2B); // Row addr
+    st7701s_data(row_addr, 4);
+
+    // Write RAM
+    st7701s_cmd(0x2C);
+    st7701s_data((uint8_t*)color_map, w * h * 2);
+
+    lv_disp_flush_ready(disp);
+}
+
+// --- LVGL tick timer ---
+static void lv_tick_task(void *arg) {
+    while (1) {
+        lv_tick_inc(2);
+        vTaskDelay(pdMS_TO_TICKS(2));
     }
-#endif
-    return high_task_awoken == pdTRUE;
 }
 
-static void example_lvgl_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_map)
-{
-    esp_lcd_panel_handle_t panel_handle = (esp_lcd_panel_handle_t) drv->user_data;
-    int offsetx1 = area->x1;
-    int offsetx2 = area->x2;
-    int offsety1 = area->y1;
-    int offsety2 = area->y2;
-#if CONFIG_EXAMPLE_AVOID_TEAR_EFFECT_WITH_SEM
-    xSemaphoreGive(sem_gui_ready);
-    xSemaphoreTake(sem_vsync_end, portMAX_DELAY);
-#endif
-    // pass the draw buffer to the driver
-    esp_lcd_panel_draw_bitmap(panel_handle, offsetx1, offsety1, offsetx2 + 1, offsety2 + 1, color_map);
-    lv_disp_flush_ready(drv);
-}
+void app_main(void) {
+    spi_init();
+    st7701s_init();
 
-static void example_increase_lvgl_tick(void *arg)
-{
-    /* Tell LVGL how many milliseconds has elapsed */
-    lv_tick_inc(EXAMPLE_LVGL_TICK_PERIOD_MS);
-}
-
-/*Read the touchpad*/
-// void example_touchpad_read( lv_indev_drv_t * drv, lv_indev_data_t * data )
-// {
-//     uint16_t touchpad_x[1] = {0};
-//     uint16_t touchpad_y[1] = {0};
-//     uint8_t touchpad_cnt = 0;
-
-//     /* Read touch controller data */
-//     esp_lcd_touch_read_data(drv->user_data);
-
-//     /* Get coordinates */
-//     bool touchpad_pressed = esp_lcd_touch_get_coordinates(drv->user_data, touchpad_x, touchpad_y, NULL, &touchpad_cnt, 1);
-
-//     if (touchpad_pressed && touchpad_cnt > 0) {
-//         data->point.x = touchpad_x[0];
-//         data->point.y = touchpad_y[0];
-//         data->state = LV_INDEV_STATE_PR;
-//         ESP_LOGI(TAG, "X=%u Y=%u", data->point.x, data->point.y);
-//     } else {
-//         data->state = LV_INDEV_STATE_REL;
-//     }
-// }
-/**
- * @brief i2c master initialization
- */
-static esp_err_t i2c_master_init(void)
-{
-    int i2c_master_port = I2C_MASTER_NUM;
-
-    i2c_config_t conf = {
-        .mode = I2C_MODE_MASTER,
-        .sda_io_num = I2C_Touch_SDA_IO,
-        .scl_io_num = I2C_Touch_SCL_IO,
-        .sda_pullup_en = GPIO_PULLUP_ENABLE,
-        .scl_pullup_en = GPIO_PULLUP_ENABLE,
-        .master.clk_speed = I2C_MASTER_FREQ_HZ,
-    };
-
-    i2c_param_config(i2c_master_port, &conf);
-
-    return i2c_driver_install(i2c_master_port, conf.mode, I2C_MASTER_RX_BUF_DISABLE, I2C_MASTER_TX_BUF_DISABLE, 0);
-}
-
-LV_IMG_DECLARE(test1);
-
-void app_main(void)
-{   
-    // Set the LEDC peripheral configuration
-    example_ledc_init();
-    // Set duty to 50%
-    ESP_ERROR_CHECK(ledc_set_duty(LEDC_MODE, LEDC_CHANNEL, LEDC_DUTY));
-    // Update duty to apply the new value
-    ESP_ERROR_CHECK(ledc_update_duty(LEDC_MODE, LEDC_CHANNEL));
-
-    ST7701S_handle st7701s = ST7701S_newObject(SPI_SDA, SPI_SCL, SPI_CS, SPI3_HOST, SPI_METHOD);
-    
-    ST7701S_screen_init(st7701s, 1);
-    static lv_disp_draw_buf_t disp_buf; // contains internal graphic buffer(s) called draw buffer(s)
-    static lv_disp_drv_t disp_drv;      // contains callback functions
-
-#if CONFIG_EXAMPLE_AVOID_TEAR_EFFECT_WITH_SEM
-    ESP_LOGI(TAG, "Create semaphores");
-    sem_vsync_end = xSemaphoreCreateBinary();
-    assert(sem_vsync_end);
-    sem_gui_ready = xSemaphoreCreateBinary();
-    assert(sem_gui_ready);
-#endif
-
-#if EXAMPLE_PIN_NUM_BK_LIGHT >= 0
-    ESP_LOGI(TAG, "Turn off LCD backlight");
-    gpio_config_t bk_gpio_config = {
-        .mode = GPIO_MODE_OUTPUT,
-        .pin_bit_mask = 1ULL << EXAMPLE_PIN_NUM_BK_LIGHT
-    };
-    ESP_ERROR_CHECK(gpio_config(&bk_gpio_config));
-#endif
-/********************* Touch *********************/
-    // ESP_ERROR_CHECK(i2c_master_init());
-    // ESP_LOGI(TAG, "I2C initialized successfully");  
-
-    // esp_lcd_touch_handle_t tp = NULL;
-    // esp_lcd_panel_io_handle_t tp_io_handle = NULL;
-    // esp_lcd_panel_io_i2c_config_t tp_io_config = ESP_LCD_TOUCH_IO_I2C_CST820_CONFIG();
-    // ESP_LOGI(TAG, "Initialize touch IO (I2C)");
-    // /* Touch IO handle */
-    // ESP_ERROR_CHECK(esp_lcd_new_panel_io_i2c((esp_lcd_i2c_bus_handle_t)I2C_MASTER_NUM, &tp_io_config, &tp_io_handle));
-    // esp_lcd_touch_config_t tp_cfg = {
-    //     .x_max = EXAMPLE_LCD_V_RES,
-    //     .y_max = EXAMPLE_LCD_H_RES,
-    //     .rst_gpio_num = I2C_Touch_RST_IO,
-    //     .int_gpio_num = I2C_Touch_INT_IO,
-    //     .flags = {
-    //         .swap_xy = 0,
-    //         .mirror_x = 0,
-    //         .mirror_y = 0,
-    //     },
-    // };
-    // /* Initialize touch */
-    // ESP_LOGI(TAG, "Initialize touch controller CST820");
-    // ESP_ERROR_CHECK(esp_lcd_touch_new_i2c_cst820(tp_io_handle, &tp_cfg, &tp));
-
-/********************* RGB LCD panel driver *********************/
-    ESP_LOGI(TAG, "Install RGB LCD panel driver");
-    esp_lcd_panel_handle_t panel_handle = NULL;
-    esp_lcd_rgb_panel_config_t panel_config = {
-        .data_width = 16, // RGB565 in parallel mode, thus 16bit in width
-        .psram_trans_align = 64,
-        .num_fbs = EXAMPLE_LCD_NUM_FB,
-#if CONFIG_EXAMPLE_USE_BOUNCE_BUFFER
-        .bounce_buffer_size_px = 10 * EXAMPLE_LCD_H_RES,
-#endif
-        .clk_src = LCD_CLK_SRC_DEFAULT,
-        .disp_gpio_num = EXAMPLE_PIN_NUM_DISP_EN,
-        .pclk_gpio_num = EXAMPLE_PIN_NUM_PCLK,
-        .vsync_gpio_num = EXAMPLE_PIN_NUM_VSYNC,
-        .hsync_gpio_num = EXAMPLE_PIN_NUM_HSYNC,
-        .de_gpio_num = EXAMPLE_PIN_NUM_DE,
-        .data_gpio_nums = {
-            EXAMPLE_PIN_NUM_DATA0,
-            EXAMPLE_PIN_NUM_DATA1,
-            EXAMPLE_PIN_NUM_DATA2,
-            EXAMPLE_PIN_NUM_DATA3,
-            EXAMPLE_PIN_NUM_DATA4,
-            EXAMPLE_PIN_NUM_DATA5,
-            EXAMPLE_PIN_NUM_DATA6,
-            EXAMPLE_PIN_NUM_DATA7,
-            EXAMPLE_PIN_NUM_DATA8,
-            EXAMPLE_PIN_NUM_DATA9,
-            EXAMPLE_PIN_NUM_DATA10,
-            EXAMPLE_PIN_NUM_DATA11,
-            EXAMPLE_PIN_NUM_DATA12,
-            EXAMPLE_PIN_NUM_DATA13,
-            EXAMPLE_PIN_NUM_DATA14,
-            EXAMPLE_PIN_NUM_DATA15,
-        },
-        .timings = {
-            .pclk_hz = EXAMPLE_LCD_PIXEL_CLOCK_HZ,
-            .h_res = EXAMPLE_LCD_H_RES,
-            .v_res = EXAMPLE_LCD_V_RES, 
-            .hsync_back_porch =  10,
-            .hsync_front_porch =  50,
-            .hsync_pulse_width =  8,
-            .vsync_back_porch = 8,
-            .vsync_front_porch = 8,
-            .vsync_pulse_width = 3, 
-            .flags.pclk_active_neg = false,
-        },
-        .flags.fb_in_psram = true, // allocate frame buffer in PSRAM
-    };
-    ESP_ERROR_CHECK(esp_lcd_new_rgb_panel(&panel_config, &panel_handle));
-
-    ESP_LOGI(TAG, "Register event callbacks");
-    esp_lcd_rgb_panel_event_callbacks_t cbs = {
-        .on_vsync = example_on_vsync_event,
-    };
-    ESP_ERROR_CHECK(esp_lcd_rgb_panel_register_event_callbacks(panel_handle, &cbs, &disp_drv));
-
-    ESP_LOGI(TAG, "Initialize RGB LCD panel");
-    ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_handle));
-    ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle));
-
-#if EXAMPLE_PIN_NUM_BK_LIGHT >= 0
-    ESP_LOGI(TAG, "Turn on LCD backlight");
-    gpio_set_level(EXAMPLE_PIN_NUM_BK_LIGHT, EXAMPLE_LCD_BK_LIGHT_ON_LEVEL);
-#endif
-
-    ESP_LOGI(TAG, "Initialize LVGL library");
+    // Initialize LVGL
     lv_init();
-    void *buf1 = NULL;
-    void *buf2 = NULL;
-#if CONFIG_EXAMPLE_DOUBLE_FB
-    ESP_LOGI(TAG, "Use frame buffers as LVGL draw buffers");
-    ESP_ERROR_CHECK(esp_lcd_rgb_panel_get_frame_buffer(panel_handle, 2, &buf1, &buf2));
-    // initialize LVGL draw buffers
-    lv_disp_draw_buf_init(&disp_buf, buf1, buf2, EXAMPLE_LCD_H_RES * EXAMPLE_LCD_V_RES);
-#else
-    ESP_LOGI(TAG, "Allocate separate LVGL draw buffers from PSRAM");
-    buf1 = heap_caps_malloc(EXAMPLE_LCD_H_RES * 100 * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
-    assert(buf1);
-    buf2 = heap_caps_malloc(EXAMPLE_LCD_H_RES * 100 * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
-    assert(buf2);
-    // initialize LVGL draw buffers
-    lv_disp_draw_buf_init(&disp_buf, buf1, buf2, EXAMPLE_LCD_H_RES * EXAMPLE_LCD_V_RES);
-#endif // CONFIG_EXAMPLE_DOUBLE_FB
+    static lv_disp_draw_buf_t draw_buf;
+    static lv_color_t buf1[LCD_H_RES * 40]; // 40 rows per buffer
+    lv_disp_draw_buf_init(&draw_buf, buf1, NULL, LCD_H_RES * 40);
 
-    ESP_LOGI(TAG, "Register display driver to LVGL");
+    static lv_disp_drv_t disp_drv;
     lv_disp_drv_init(&disp_drv);
-    disp_drv.hor_res = EXAMPLE_LCD_H_RES;
-    disp_drv.ver_res = EXAMPLE_LCD_V_RES;
-    disp_drv.flush_cb = example_lvgl_flush_cb;
-    disp_drv.draw_buf = &disp_buf;
-    disp_drv.user_data = panel_handle;
-#if CONFIG_EXAMPLE_DOUBLE_FB
-    disp_drv.full_refresh = true; // the full_refresh mode can maintain the synchronization between the two frame buffers
-#endif
-    lv_disp_t *disp = lv_disp_drv_register(&disp_drv);
+    disp_drv.hor_res = LCD_H_RES;
+    disp_drv.ver_res = LCD_V_RES;
+    disp_drv.flush_cb = lvgl_flush_cb;
+    disp_drv.draw_buf = &draw_buf;
+    lv_disp_drv_register(&disp_drv);
 
-    ESP_LOGI(TAG, "Install LVGL tick timer");
-    // Tick interface for LVGL (using esp_timer to generate 2ms periodic event)
-    const esp_timer_create_args_t lvgl_tick_timer_args = {
-        .callback = &example_increase_lvgl_tick,
-        .name = "lvgl_tick"
-    };
+    // LVGL tick task
+    xTaskCreate(lv_tick_task, "lv_tick", 1024 * 2, NULL, 5, NULL);
 
-/********************* LVGL *********************/
-    ESP_LOGI(TAG,"Register display indev to LVGL");
-    lv_indev_drv_t indev_drv;
-    lv_indev_drv_init ( &indev_drv );
-    indev_drv.type = LV_INDEV_TYPE_POINTER;
-    indev_drv.disp = disp;
-    // indev_drv.read_cb = example_touchpad_read;
-    // indev_drv.user_data = tp;
-    lv_indev_drv_register( &indev_drv );
-
-    esp_timer_handle_t lvgl_tick_timer = NULL;
-    ESP_ERROR_CHECK(esp_timer_create(&lvgl_tick_timer_args, &lvgl_tick_timer));
-    ESP_ERROR_CHECK(esp_timer_start_periodic(lvgl_tick_timer, EXAMPLE_LVGL_TICK_PERIOD_MS * 1000));
-
-    lv_obj_t * icon = lv_img_create(lv_scr_act());
-    lv_img_set_src(icon, &test1);
+    // Demo: draw a red rectangle
+    lv_obj_t *rect = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(rect, 480, 480);
+    lv_obj_set_style_bg_color(rect, lv_color_hex(0xFF0000), 0);
 
     while (1) {
-        // raise the task priority of LVGL and/or reduce the handler period can improve the performance
-        vTaskDelay(pdMS_TO_TICKS(10));
-        // The task running lv_timer_handler should have lower priority than that running `lv_tick_inc`
         lv_timer_handler();
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
-
-
-// #include <stdio.h>
-// #include "freertos/FreeRTOS.h"
-// #include "freertos/task.h"
-// #include "driver/spi_master.h"
-// #include "driver/gpio.h"
-// #include "esp_lcd_panel_ops.h"
-// #include "esp_lcd_panel_spi.h"
-// #include "esp_log.h"
-// #include "lvgl.h"
-
-// #define TAG "ST7701S_SPI"
-
-// /********************* SPI Pins *********************/
-// #define SPI_SCLK  2
-// #define SPI_MOSI  1
-// #define SPI_CS    42
-// #define SPI_DC    3
-// #define SPI_RST   4
-// #define SPI_BL    6
-
-// /********************* LVGL *********************/
-// #define LVGL_TICK_PERIOD_MS 2
-
-// static void lvgl_tick_cb(void *arg)
-// {
-//     lv_tick_inc(LVGL_TICK_PERIOD_MS);
-// }
-
-// /********************* Backlight *********************/
-// static void bl_init(void)
-// {
-//     gpio_reset_pin(SPI_BL);
-//     gpio_set_direction(SPI_BL, GPIO_MODE_OUTPUT);
-//     gpio_set_level(SPI_BL, 1); // Turn on backlight
-// }
-
-// /********************* Main *********************/
-// void app_main(void)
-// {
-//     ESP_LOGI(TAG, "Initialize Backlight");
-//     bl_init();
-
-//     ESP_LOGI(TAG, "Initialize SPI Bus");
-//     spi_bus_config_t buscfg = {
-//         .mosi_io_num = SPI_MOSI,
-//         .miso_io_num = -1,
-//         .sclk_io_num = SPI_SCLK,
-//         .quadwp_io_num = -1,
-//         .quadhd_io_num = -1,
-//         .max_transfer_sz = 480*480*2 + 8
-//     };
-//     ESP_ERROR_CHECK(spi_bus_initialize(SPI3_HOST, &buscfg, SPI_DMA_CH_AUTO));
-
-//     ESP_LOGI(TAG, "Attach ST7701S panel to SPI");
-//     esp_lcd_panel_io_spi_config_t io_config = {
-//         .dc_gpio_num = SPI_DC,
-//         .cs_gpio_num = SPI_CS,
-//         .pclk_hz = 20*1000*1000, // 20 MHz SPI clock
-//         .flags = {
-//             .dc_high_on_data = 1
-//         }
-//     };
-//     esp_lcd_panel_io_handle_t io_handle = NULL;
-//     ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi(SPI3_HOST, &io_config, &io_handle));
-
-//     esp_lcd_panel_handle_t panel_handle = NULL;
-//     esp_lcd_panel_dev_config_t panel_dev_cfg = {
-//         .reset_gpio_num = SPI_RST,
-//         .rgb_endian = LCD_RGB_ENDIAN_RGB,
-//         .bits_per_pixel = 16,
-//         .cmd_bits = 8,
-//         .param_bits = 8
-//     };
-//     ESP_ERROR_CHECK(esp_lcd_new_panel_st7701s(io_handle, &panel_dev_cfg, &panel_handle));
-//     ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_handle));
-//     ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle));
-//     ESP_ERROR_CHECK(esp_lcd_panel_set_gap(panel_handle, 0, 0));
-
-//     ESP_LOGI(TAG, "Initialize LVGL");
-//     lv_init();
-//     static lv_disp_draw_buf_t disp_buf;
-//     static lv_color_t buf1[480*20]; // small buffer
-//     lv_disp_draw_buf_init(&disp_buf, buf1, NULL, 480*480);
-
-//     lv_disp_drv_t disp_drv;
-//     lv_disp_drv_init(&disp_drv);
-//     disp_drv.hor_res = 480;
-//     disp_drv.ver_res = 480;
-//     disp_drv.flush_cb = [](lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_map){
-//         esp_lcd_panel_handle_t panel = (esp_lcd_panel_handle_t)drv->user_data;
-//         esp_lcd_panel_draw_bitmap(panel, area->x1, area->y1, area->x2+1, area->y2+1, color_map);
-//         lv_disp_flush_ready(drv);
-//     };
-//     disp_drv.draw_buf = &disp_buf;
-//     disp_drv.user_data = panel_handle;
-//     lv_disp_drv_register(&disp_drv);
-
-//     ESP_LOGI(TAG, "Start LVGL tick timer");
-//     const esp_timer_create_args_t tick_timer_args = {
-//         .callback = &lvgl_tick_cb,
-//         .name = "lv_tick"
-//     };
-//     esp_timer_handle_t lv_tick_timer;
-//     ESP_ERROR_CHECK(esp_timer_create(&tick_timer_args, &lv_tick_timer));
-//     ESP_ERROR_CHECK(esp_timer_start_periodic(lv_tick_timer, LVGL_TICK_PERIOD_MS * 1000));
-
-//     // Test image
-//     LV_IMG_DECLARE(test1);
-//     lv_obj_t *icon = lv_img_create(lv_scr_act());
-//     lv_img_set_src(icon, &test1);
-
-//     while(1) {
-//         lv_timer_handler();
-//         vTaskDelay(pdMS_TO_TICKS(10));
-//     }
-// }
