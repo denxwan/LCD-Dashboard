@@ -1,209 +1,79 @@
-#include <stdio.h>
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "driver/spi_master.h"
-#include "driver/gpio.h"
-#include "esp_log.h"
-#include "lvgl.h"
-
-#define TAG "ST7701S_SPI_LCD"
-
-// SPI pins
-#define SPI_MOSI 1
-#define SPI_SCLK 2
-#define SPI_CS   42
-#define SPI_DC   3
-#define SPI_RST  4
-
-// Physical visible resolution
-#define LCD_H_RES 480
-#define LCD_V_RES_VISIBLE 480
-
-// Internal ST7701S scan height (important)
-#define LCD_V_RES_INTERNAL 854
-
-static spi_device_handle_t lcd_spi = NULL;
-
-// --------------------------------------------------
-// SPI pre-transfer callback
-// --------------------------------------------------
-static void lcd_spi_pre_transfer_callback(spi_transaction_t *t)
-{
-    gpio_set_level(SPI_DC, (int)t->user);
-}
-
-// --------------------------------------------------
-// SPI helpers
-// --------------------------------------------------
-static void st7701s_cmd(uint8_t cmd)
-{
-    spi_transaction_t t = {
-        .length = 8,
-        .tx_buffer = &cmd,
-        .user = (void*)0
-    };
-    ESP_ERROR_CHECK(spi_device_polling_transmit(lcd_spi, &t));
-}
-
-static void st7701s_data(const uint8_t *data, int len)
-{
-    spi_transaction_t t = {
-        .length = len * 8,
-        .tx_buffer = data,
-        .user = (void*)1
-    };
-    ESP_ERROR_CHECK(spi_device_polling_transmit(lcd_spi, &t));
-}
-
-// --------------------------------------------------
-// ORIGINAL, WORKING ST7701S INIT (UNCHANGED)
-// --------------------------------------------------
-static void st7701s_init(void)
-{
-    gpio_set_level(SPI_RST, 0);
-    vTaskDelay(pdMS_TO_TICKS(50));
-    gpio_set_level(SPI_RST, 1);
-    vTaskDelay(pdMS_TO_TICKS(120));
-
-    st7701s_cmd(0x11); // Sleep Out
-    vTaskDelay(pdMS_TO_TICKS(120));
-
-    // Command set
-    st7701s_cmd(0xFF);
-    uint8_t cmdset[] = {0x77, 0x01, 0x00, 0x00, 0x10};
-    st7701s_data(cmdset, 5);
-
-    // Display line setting (as originally working)
-    st7701s_cmd(0xC0);
-    uint8_t c0[] = {0x3B, 0x00};
-    st7701s_data(c0, 2);
-
-    // Porch (original values)
-    st7701s_cmd(0xC1);
-    uint8_t c1[] = {0x0C, 0x02};
-    st7701s_data(c1, 2);
-
-    // Memory access
-    st7701s_cmd(0x36);
-    uint8_t madctl = 0x00;
-    st7701s_data(&madctl, 1);
-
-    // RGB565
-    st7701s_cmd(0x3A);
-    uint8_t pf = 0x55;
-    st7701s_data(&pf, 1);
-
-    st7701s_cmd(0x29); // Display ON
-}
-
-// --------------------------------------------------
-// SPI init
-// --------------------------------------------------
-static void spi_init(void)
-{
-    spi_bus_config_t buscfg = {
-        .mosi_io_num = SPI_MOSI,
-        .miso_io_num = -1,
-        .sclk_io_num = SPI_SCLK,
-        .quadwp_io_num = -1,
-        .quadhd_io_num = -1,
-        .max_transfer_sz = LCD_H_RES * 8 * 2
-    };
-    ESP_ERROR_CHECK(spi_bus_initialize(SPI3_HOST, &buscfg, SPI_DMA_CH_AUTO));
-
-    spi_device_interface_config_t devcfg = {
-        .clock_speed_hz = 40 * 1000 * 1000,
-        .mode = 0,
-        .spics_io_num = SPI_CS,
-        .queue_size = 7,
-        .pre_cb = lcd_spi_pre_transfer_callback,
-    };
-    ESP_ERROR_CHECK(spi_bus_add_device(SPI3_HOST, &devcfg, &lcd_spi));
-
-    gpio_set_direction(SPI_DC, GPIO_MODE_OUTPUT);
-    gpio_set_direction(SPI_RST, GPIO_MODE_OUTPUT);
-}
-
-// --------------------------------------------------
-// LVGL flush
-// --------------------------------------------------
-static void lvgl_flush_cb(lv_disp_drv_t *disp,
-                          const lv_area_t *area,
-                          lv_color_t *color_map)
-{
-    int32_t w = area->x2 - area->x1 + 1;
-    int32_t h = area->y2 - area->y1 + 1;
-    const int32_t max_rows = 8;
-
-    for (int row = 0; row < h; row += max_rows) {
-        int rows = (row + max_rows > h) ? (h - row) : max_rows;
-
-        uint8_t col[] = {
-            area->x1 >> 8, area->x1 & 0xFF,
-            area->x2 >> 8, area->x2 & 0xFF
-        };
-        st7701s_cmd(0x2A);
-        st7701s_data(col, 4);
-
-        uint16_t y1 = area->y1 + row;
-        uint16_t y2 = y1 + rows - 1;
-        uint8_t row_addr[] = {
-            y1 >> 8, y1 & 0xFF,
-            y2 >> 8, y2 & 0xFF
-        };
-        st7701s_cmd(0x2B);
-        st7701s_data(row_addr, 4);
-
-        st7701s_cmd(0x2C);
-        st7701s_data((uint8_t *)&color_map[row * w], w * rows * 2);
-    }
-
-    lv_disp_flush_ready(disp);
-}
-
-// --------------------------------------------------
-// LVGL tick
-// --------------------------------------------------
-static void lv_tick_task(void *arg)
-{
-    while (1) {
-        lv_tick_inc(10);
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
-}
-
-// --------------------------------------------------
-// MAIN
-// --------------------------------------------------
-void app_main(void)
-{
-    spi_init();
-    st7701s_init();
-
-    lv_init();
-
-    static lv_disp_draw_buf_t draw_buf;
-    static lv_color_t buf1[LCD_H_RES * 40];
-    lv_disp_draw_buf_init(&draw_buf, buf1, NULL, LCD_H_RES * 40);
-
-    static lv_disp_drv_t disp_drv;
-    lv_disp_drv_init(&disp_drv);
-    disp_drv.hor_res = LCD_H_RES;
-    disp_drv.ver_res = LCD_V_RES_INTERNAL;   // <-- IMPORTANT
-    disp_drv.flush_cb = lvgl_flush_cb;
-    disp_drv.draw_buf = &draw_buf;
-    lv_disp_drv_register(&disp_drv);
-
-    xTaskCreatePinnedToCore(lv_tick_task, "lv_tick", 4096, NULL, 5, NULL, 1);
-
-    // Visible-area test object (centered)
-    lv_obj_t *rect = lv_obj_create(lv_scr_act());
-    lv_obj_set_size(rect, LCD_H_RES, LCD_V_RES_VISIBLE);
-    lv_obj_align(rect, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_set_style_bg_color(rect, lv_color_hex(0xFF0000), 0);
-
-    while (1) {
-        lv_timer_handler();
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
-}
+I (158) esp_image: segment 4: paddr=0006d80c vaddr=40380184 sizeESP-ROM:esp32s3-20210327
+Build:Mar 27 2021
+rst:0x15 (USB_UART_CHIP_RESET),boot:0x8 (SPI_FAST_FLASH_BOOT)
+Saved PC:0x40378f4e
+--- 0x40378f4e: esp_cpu_wait_for_intr at /home/denxwan/esp/v5.5.2/esp-idf/components/esp_hw_support/cpu.c:64
+SPIWP:0xee
+mode:DIO, clock div:1
+load:0x3fce2820,len:0x158c
+load:0x403c8700,len:0xd24
+load:0x403cb700,len:0x2f34
+entry 0x403c8924
+I (24) boot: ESP-IDF v5.5.2-dirty 2nd stage bootloader
+I (24) boot: compile time Dec 30 2025 23:47:03
+I (25) boot: Multicore bootloader
+I (25) boot: chip revision: v0.2
+I (28) boot: efuse block revision: v1.3
+I (32) boot.esp32s3: Boot SPI Speed : 80MHz
+I (35) boot.esp32s3: SPI Mode       : DIO
+I (39) boot.esp32s3: SPI Flash Size : 2MB
+I (43) boot: Enabling RNG early entropy source...
+I (47) boot: Partition Table:
+I (50) boot: ## Label            Usage          Type ST Offset   Length
+I (56) boot:  0 nvs              WiFi data        01 02 00009000 00006000
+I (63) boot:  1 phy_init         RF data          01 01 0000f000 00001000
+I (69) boot:  2 factory          factory app      00 00 00010000 00100000
+I (76) boot: End of partition table
+I (79) esp_image: segment 0: paddr=00010020 vaddr=3c040020 size=10c44h ( 68676) map
+I (99) esp_image: segment 1: paddr=00020c6c vaddr=3fc96400 size=03220h ( 12832) load
+I (102) esp_image: segment 2: paddr=00023e94 vaddr=40374000 size=0c184h ( 49540) load
+I (113) esp_image: segment 3: paddr=00030020 vaddr=42000020 size=3d7e4h (251876) map
+I (158) esp_image: segment 4: paddr=0006d80c vaddr=40380184 size=061cch ( 25036) load
+I (164) esp_image: segment 5: paddr=000739e0 vaddr=50000000 size=00020h (    32) load
+I (172) boot: Loaded app from partition at offset 0x10000
+I (172) boot: Disabling RNG early entropy source...
+I (184) octal_psram: vendor id    : 0x0d (AP)
+I (184) octal_psram: dev id       : 0x02 (generation 3)
+I (184) octal_psram: density      : 0x03 (64 Mbit)
+I (186) octal_psram: good-die     : 0x01 (Pass)
+I (190) octal_psram: Latency      : 0x01 (Fixed)
+I (195) octal_psram: VCC          : 0x01 (3V)
+I (199) octal_psram: SRF          : 0x01 (Fast Refresh)
+I (204) octal_psram: BurstType    : 0x01 (Hybrid Wrap)
+I (209) octal_psram: BurstLen     : 0x01 (32 Byte)
+I (213) octal_psram: Readlatency  : 0x02 (10 cycles@Fixed)
+I (218) octal_psram: DriveStrength: 0x00 (1/1)
+I (222) MSPI Timing: Enter psram timing tuning
+I (227) esp_psram: Found 8MB PSRAM device
+I (230) esp_psram: Speed: 80MHz
+I (246) mmu_psram: Read only data copied and mapped to SPIRAM
+I (273) mmu_psram: Instructions copied and mapped to SPIRAM
+I (274) cpu_start: Multicore app
+I (680) esp_psram: SPI SRAM memory test OK
+I (688) cpu_start: GPIO 44 and 43 are used as console UART I/O pins
+I (689) cpu_start: Pro cpu start user code
+I (689) cpu_start: cpu freq: 160000000 Hz
+I (691) app_init: Application information:
+I (695) app_init: Project name:     rgb_panel
+I (699) app_init: App version:      1
+I (702) app_init: Compile time:     Dec 30 2025 23:46:53
+I (707) app_init: ELF file SHA256:  19404b925...
+I (711) app_init: ESP-IDF:          v5.5.2-dirty
+I (716) efuse_init: Min chip rev:     v0.0
+I (720) efuse_init: Max chip rev:     v0.99 
+I (724) efuse_init: Chip rev:         v0.2
+I (727) heap_init: Initializing. RAM available for dynamic allocation:
+I (734) heap_init: At 3FCA3A90 len 00045C80 (279 KiB): RAM
+I (739) heap_init: At 3FCE9710 len 00005724 (21 KiB): RAM
+I (744) heap_init: At 3FCF0000 len 00008000 (32 KiB): DRAM
+I (749) heap_init: At 600FE000 len 00001FE8 (7 KiB): RTCRAM
+I (755) esp_psram: Adding pool of 7808K of PSRAM memory to heap allocator
+I (761) esp_psram: Adding pool of 60K of PSRAM memory gap generated due to end address alignment of drom to the heap allocator
+I (773) spi_flash: detected chip: gd
+I (775) spi_flash: flash io: dio
+W (778) spi_flash: Detected size(8192k) larger than the size in the binary image header(2048k). Using the size in the binary image header.
+I (791) sleep_gpio: Configure to isolate all GPIO pins in sleep state
+I (797) sleep_gpio: Enable automatic switching of GPIO sleep configuration
+I (804) main_task: Started on CPU0
+I (814) esp_psram: Reserving pool of 32K of internal memory for DMA/internal allocations
+I (814) main_task: Calling app_main()
