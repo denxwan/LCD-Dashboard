@@ -15,23 +15,26 @@
 #define SPI_DC   3
 #define SPI_RST  4
 
-// LCD resolution
+// Physical visible resolution
 #define LCD_H_RES 480
-#define LCD_V_RES 480
+#define LCD_V_RES_VISIBLE 480
+
+// Internal ST7701S scan height (important)
+#define LCD_V_RES_INTERNAL 854
 
 static spi_device_handle_t lcd_spi = NULL;
 
-// ---------------------------------------------------
-// SPI pre-transfer callback (DC pin)
-// ---------------------------------------------------
+// --------------------------------------------------
+// SPI pre-transfer callback
+// --------------------------------------------------
 static void lcd_spi_pre_transfer_callback(spi_transaction_t *t)
 {
     gpio_set_level(SPI_DC, (int)t->user);
 }
 
-// ---------------------------------------------------
+// --------------------------------------------------
 // SPI helpers
-// ---------------------------------------------------
+// --------------------------------------------------
 static void st7701s_cmd(uint8_t cmd)
 {
     spi_transaction_t t = {
@@ -52,9 +55,9 @@ static void st7701s_data(const uint8_t *data, int len)
     ESP_ERROR_CHECK(spi_device_polling_transmit(lcd_spi, &t));
 }
 
-// ---------------------------------------------------
-// ST7701S initialization (FIXED)
-// ---------------------------------------------------
+// --------------------------------------------------
+// ORIGINAL, WORKING ST7701S INIT (UNCHANGED)
+// --------------------------------------------------
 static void st7701s_init(void)
 {
     gpio_set_level(SPI_RST, 0);
@@ -62,38 +65,25 @@ static void st7701s_init(void)
     gpio_set_level(SPI_RST, 1);
     vTaskDelay(pdMS_TO_TICKS(120));
 
-    // Sleep Out
-    st7701s_cmd(0x11);
+    st7701s_cmd(0x11); // Sleep Out
     vTaskDelay(pdMS_TO_TICKS(120));
 
-    // Enable Command Set 1
+    // Command set
     st7701s_cmd(0xFF);
-    uint8_t cmdset1[] = {0x77, 0x01, 0x00, 0x00, 0x10};
-    st7701s_data(cmdset1, 5);
+    uint8_t cmdset[] = {0x77, 0x01, 0x00, 0x00, 0x10};
+    st7701s_data(cmdset, 5);
 
-    // ---------------------------------------------------
-    // Panel vertical resolution = 480 lines
-    // ---------------------------------------------------
+    // Display line setting (as originally working)
     st7701s_cmd(0xC0);
-    uint8_t c0[] = {0x3B, 0x00};   // (59+1)*8 = 480
+    uint8_t c0[] = {0x3B, 0x00};
     st7701s_data(c0, 2);
 
-    // Porch control (prevents vertical stretch)
+    // Porch (original values)
     st7701s_cmd(0xC1);
-    uint8_t c1[] = {0x0B, 0x02};   // VBP=11, VFP=2
+    uint8_t c1[] = {0x0C, 0x02};
     st7701s_data(c1, 2);
 
-    // Disable internal vertical scaling
-    st7701s_cmd(0xB0);
-    uint8_t b0[] = {0x00};
-    st7701s_data(b0, 1);
-
-    // Inversion mode (stable scan)
-    st7701s_cmd(0xB1);
-    uint8_t b1[] = {0x40};         // 2-dot inversion
-    st7701s_data(b1, 1);
-
-    // Memory access control
+    // Memory access
     st7701s_cmd(0x36);
     uint8_t madctl = 0x00;
     st7701s_data(&madctl, 1);
@@ -103,13 +93,12 @@ static void st7701s_init(void)
     uint8_t pf = 0x55;
     st7701s_data(&pf, 1);
 
-    // Display ON
-    st7701s_cmd(0x29);
+    st7701s_cmd(0x29); // Display ON
 }
 
-// ---------------------------------------------------
-// SPI initialization
-// ---------------------------------------------------
+// --------------------------------------------------
+// SPI init
+// --------------------------------------------------
 static void spi_init(void)
 {
     spi_bus_config_t buscfg = {
@@ -135,9 +124,9 @@ static void spi_init(void)
     gpio_set_direction(SPI_RST, GPIO_MODE_OUTPUT);
 }
 
-// ---------------------------------------------------
-// LVGL flush callback
-// ---------------------------------------------------
+// --------------------------------------------------
+// LVGL flush
+// --------------------------------------------------
 static void lvgl_flush_cb(lv_disp_drv_t *disp,
                           const lv_area_t *area,
                           lv_color_t *color_map)
@@ -149,7 +138,6 @@ static void lvgl_flush_cb(lv_disp_drv_t *disp,
     for (int row = 0; row < h; row += max_rows) {
         int rows = (row + max_rows > h) ? (h - row) : max_rows;
 
-        // Column address
         uint8_t col[] = {
             area->x1 >> 8, area->x1 & 0xFF,
             area->x2 >> 8, area->x2 & 0xFF
@@ -157,7 +145,6 @@ static void lvgl_flush_cb(lv_disp_drv_t *disp,
         st7701s_cmd(0x2A);
         st7701s_data(col, 4);
 
-        // Row address
         uint16_t y1 = area->y1 + row;
         uint16_t y2 = y1 + rows - 1;
         uint8_t row_addr[] = {
@@ -167,7 +154,6 @@ static void lvgl_flush_cb(lv_disp_drv_t *disp,
         st7701s_cmd(0x2B);
         st7701s_data(row_addr, 4);
 
-        // Write memory
         st7701s_cmd(0x2C);
         st7701s_data((uint8_t *)&color_map[row * w], w * rows * 2);
     }
@@ -175,9 +161,9 @@ static void lvgl_flush_cb(lv_disp_drv_t *disp,
     lv_disp_flush_ready(disp);
 }
 
-// ---------------------------------------------------
-// LVGL tick task
-// ---------------------------------------------------
+// --------------------------------------------------
+// LVGL tick
+// --------------------------------------------------
 static void lv_tick_task(void *arg)
 {
     while (1) {
@@ -186,9 +172,9 @@ static void lv_tick_task(void *arg)
     }
 }
 
-// ---------------------------------------------------
-// Main
-// ---------------------------------------------------
+// --------------------------------------------------
+// MAIN
+// --------------------------------------------------
 void app_main(void)
 {
     spi_init();
@@ -203,16 +189,17 @@ void app_main(void)
     static lv_disp_drv_t disp_drv;
     lv_disp_drv_init(&disp_drv);
     disp_drv.hor_res = LCD_H_RES;
-    disp_drv.ver_res = LCD_V_RES;
+    disp_drv.ver_res = LCD_V_RES_INTERNAL;   // <-- IMPORTANT
     disp_drv.flush_cb = lvgl_flush_cb;
     disp_drv.draw_buf = &draw_buf;
     lv_disp_drv_register(&disp_drv);
 
     xTaskCreatePinnedToCore(lv_tick_task, "lv_tick", 4096, NULL, 5, NULL, 1);
 
-    // Test object
+    // Visible-area test object (centered)
     lv_obj_t *rect = lv_obj_create(lv_scr_act());
-    lv_obj_set_size(rect, LCD_H_RES, LCD_V_RES);
+    lv_obj_set_size(rect, LCD_H_RES, LCD_V_RES_VISIBLE);
+    lv_obj_align(rect, LV_ALIGN_CENTER, 0, 0);
     lv_obj_set_style_bg_color(rect, lv_color_hex(0xFF0000), 0);
 
     while (1) {
